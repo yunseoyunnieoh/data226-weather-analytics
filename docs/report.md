@@ -2,7 +2,7 @@
 
 **Course:** SJSU DATA 226
 **Team members:** Yunseo Oh (020746206), Isabella Shi (019256965)
-**Repository:** [INSERT FINAL GITHUB REPOSITORY URL -- not yet created/pushed]
+**Repository:** https://github.com/yunseoyunnieoh/data226-weather-analytics
 **Date:** [INSERT SUBMISSION DATE]
 
 ---
