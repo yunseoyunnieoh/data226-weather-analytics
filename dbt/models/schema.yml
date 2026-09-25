@@ -1,0 +1,40 @@
+version: 2
+
+models:
+  - name: stg_weather
+    description: "Cleaned pass-through of DEV.RAW.CITY_WEATHER_DAILY with a city_date surrogate key"
+    columns:
+      - name: city_date
+        description: "Surrogate key: city concatenated with date, e.g. 'Seoul_2026-09-20'"
+        data_tests:
+          - unique
+          - not_null
+      - name: city
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['Seoul', 'Toronto']
+      - name: weather_date
+        data_tests:
+          - not_null
+
+  - name: weather_analytics
+    description: >
+      Daily weather analytics per city: moving 7-day average temperature,
+      temperature anomaly vs. the city's baseline, rolling 7-day
+      precipitation, and current dry spell length. Source for the BI
+      dashboard.
+    columns:
+      - name: city_date
+        description: "Surrogate key: city concatenated with date"
+        data_tests:
+          - unique
+          - not_null
+      - name: city
+        data_tests:
+          - not_null
+          - accepted_values:
+              values: ['Seoul', 'Toronto']
+      - name: weather_date
+        data_tests:
+          - not_null

@@ -1,0 +1,29 @@
+# Airflow runtime (created by docker compose)
+logs/
+plugins/*
+!plugins/.gitkeep
+config/*
+!config/.gitkeep
+.env
+
+# dbt
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles.yml
+dbt/.user.yml
+
+# Snowflake keys / secrets - never commit
+*.p8
+*.pub
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# OS junk
+.DS_Store

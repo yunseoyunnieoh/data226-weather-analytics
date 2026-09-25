@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: raw
+    database: dev
+    schema: raw
+    description: "Raw weather rows loaded by dags/weather_etl_dag.py from the Open-Meteo forecast API"
+    tables:
+      - name: city_weather_daily
+        identifier: city_weather_daily
+        description: "One row per (city, date): temp_max/min, precipitation, weather_code. Upserted, not appended."
+        columns:
+          - name: city
+            description: "City name (Seoul or Toronto) -- the partition key for all window functions downstream"
+          - name: date
+            description: "Calendar date of the observation/forecast, in the city's local timezone"

@@ -1,0 +1,25 @@
+# Copy this file to dbt/profiles.yml (gitignored, never committed) and fill
+# in your own Snowflake account/user. This same file, mounted read-only into
+# the Airflow containers by docker-compose.yaml, is also what
+# dags/weather_dbt_dag.py points dbt at via --profiles-dir /opt/airflow/dbt.
+#
+# private_key_path below assumes the key lives on the host at the folder you
+# set as SNOWFLAKE_KEY_DIR in .env, mounted into the container at
+# /opt/airflow/snowflake_keys (see docker-compose.yaml). If you run dbt
+# locally (outside Docker) instead, point private_key_path at the key's real
+# path on your machine, e.g. ~/.snowflake/data226_team/rsa_key.p8.
+
+weather_analytics:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: YOUR_ACCOUNT_LOCATOR
+      user: YOUR_SNOWFLAKE_USERNAME
+      role: YOUR_ROLE
+      private_key_path: /opt/airflow/snowflake_keys/rsa_key.p8
+      private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE') }}"
+      database: DEV
+      warehouse: COMPUTE_WH
+      schema: analytics
+      threads: 4

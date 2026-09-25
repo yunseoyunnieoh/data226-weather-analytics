@@ -1,0 +1,11 @@
+# These are installed inside the Airflow container via docker-compose.yaml's
+# _PIP_ADDITIONAL_REQUIREMENTS. This file documents the same versions for
+# anyone running the ETL/dbt steps outside Docker (e.g. local dbt CLI).
+apache-airflow-providers-snowflake==5.7.0
+snowflake-connector-python==3.12.2
+snowflake-sqlalchemy==1.6.1
+dbt-core==1.8.7
+dbt-snowflake==1.8.1
+dbt-common==1.10.0
+dbt-adapters==1.7.0
+requests==2.32.3
