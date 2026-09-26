@@ -1,7 +1,7 @@
 # System Architecture
 
 ```mermaid
-flowchart TD
+flowchart LR
     A["Open-Meteo Forecast API\napi.open-meteo.com/v1/forecast"] -->|"one request per city"| B
 
     subgraph AF["Apache Airflow (Docker, LocalExecutor)"]
@@ -21,7 +21,7 @@ flowchart TD
     end
 
     E --> F
-    H --> J["BI Dashboard\n(Superset / Preset / Tableau)"]
+    H --> J["Preset Dashboard\n(Weather Analytics Dashboard)"]
 ```
 
 ## Notes
@@ -43,6 +43,9 @@ flowchart TD
   since Open-Meteo revises very recent days as more observations arrive and
   there is no natural `updated_at` column.
 
-To export a PNG/SVG of the diagram above: paste the ```mermaid``` block into
-the [Mermaid Live Editor](https://mermaid.live) and download the image, or
-render it locally with `mmdc` (`@mermaid-js/mermaid-cli`) if installed.
+A pre-rendered `architecture_diagram.png` (generated from this file's
+Mermaid source via `mmdc`) lives alongside this file and is embedded
+directly in `docs/report.md` Section 4. To regenerate it after editing the
+diagram above, extract the ```mermaid``` block to `architecture.mmd` and run
+`mmdc -i architecture.mmd -o architecture_diagram.png -b white -s 3`, or
+paste the block into the [Mermaid Live Editor](https://mermaid.live).

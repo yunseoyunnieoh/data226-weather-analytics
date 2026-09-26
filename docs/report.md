@@ -57,15 +57,16 @@ duplicating the ETL and transformation logic per city.
 
 ## 4. Architecture
 
-See `docs/architecture.md` for the full Mermaid diagram and narrative. In
-short:
+Full Mermaid source and narrative notes: `docs/architecture.md`. Rendered
+diagram:
 
-```
-Open-Meteo API --> Airflow (weather_etl_dag: extract/transform/load) --> Snowflake RAW
-    --> [TriggerDagRunOperator] --> Airflow (weather_dbt_dag: dbt run/snapshot/test)
-    --> dbt staging -> intermediate -> analytics --> Snowflake analytics layer
-    --> BI dashboard
-```
+**System Architecture Diagram.** Open-Meteo -> Airflow ETL DAG -> Snowflake
+RAW -> (triggered) Airflow dbt DAG -> dbt staging/intermediate/analytics ->
+Snowflake analytics layer -> Preset dashboard, with the `CITY_CONFIG`
+Variable and `snowflake_conn` Connection feeding the ETL DAG and the
+`weather_snapshot` snapshot sitting alongside the analytics table.
+
+![System architecture diagram: Open-Meteo API through Airflow ETL, Snowflake RAW, the triggered dbt DAG, dbt's staging/intermediate/analytics layers, the Snowflake snapshot, and the Preset dashboard](architecture_diagram.png)
 
 ![Figure 1. weather_etl_dag graph view: extract, transform, load, trigger_dbt_dag all succeeded](../screenshots/03_etl_dag_graph.png)
 
@@ -126,48 +127,103 @@ the pipeline is self-provisioning).
 
 ## 8. Table Structures
 
+All four tables below were inspected directly in the live Snowflake account
+(`DESC TABLE`) to confirm actual column types and nullability, not assumed
+from the DDL/model SQL alone -- Snowflake sometimes normalizes or relaxes
+both (e.g. `INTEGER` is stored as `NUMBER(38,0)`; `CREATE TABLE AS SELECT`
+makes every output column nullable regardless of the source).
+
 ### `DEV.RAW.CITY_WEATHER_DAILY` (raw, loaded by Airflow)
 
-| Column | Type | Constraint | Description |
-| --- | --- | --- | --- |
-| CITY | VARCHAR(64) | NOT NULL, part of PK | City name (`Seoul`, `Toronto`) |
-| LATITUDE | FLOAT | NOT NULL | Requested latitude |
-| LONGITUDE | FLOAT | NOT NULL | Requested longitude |
-| DATE | DATE | NOT NULL, part of PK | Local calendar date of the reading |
-| TEMP_MAX | FLOAT | nullable | Daily max temperature, Celsius |
-| TEMP_MIN | FLOAT | nullable | Daily min temperature, Celsius |
-| PRECIPITATION | FLOAT | nullable | Daily precipitation total, mm |
-| WEATHER_CODE | INTEGER | nullable | WMO weather interpretation code |
-| LOADED_AT | TIMESTAMP_NTZ | default `CURRENT_TIMESTAMP()` | Last upsert time for this row |
+| Column | Type | Nullable | Constraint | Description |
+| --- | --- | --- | --- | --- |
+| CITY | VARCHAR(64) | N | part of PK | City name (`Seoul`, `Toronto`) |
+| LATITUDE | FLOAT | N | -- | Requested latitude |
+| LONGITUDE | FLOAT | N | -- | Requested longitude |
+| DATE | DATE | N | part of PK | Local calendar date of the reading |
+| TEMP_MAX | FLOAT | Y | -- | Daily max temperature, Celsius |
+| TEMP_MIN | FLOAT | Y | -- | Daily min temperature, Celsius |
+| PRECIPITATION | FLOAT | Y | -- | Daily precipitation total, mm |
+| WEATHER_CODE | NUMBER(38,0) | Y | -- | WMO weather interpretation code (declared `INTEGER`; Snowflake stores all integers as `NUMBER(38,0)`) |
+| LOADED_AT | TIMESTAMP_NTZ(9) | Y | default `CURRENT_TIMESTAMP()` | Last upsert time for this row |
 
 Declared key: `PRIMARY KEY (CITY, DATE)` (declarative only in Snowflake;
 enforced by the `MERGE` + duplicate-check in `load()`, not by the database).
 
 ### `DEV.ANALYTICS.stg_weather` (dbt view)
 
-Same columns as the raw table (renamed `DATE` -> `WEATHER_DATE`) plus
-`CITY_DATE` (surrogate key: `CITY || '_' || DATE`).
+| Column | Type | Nullable | Description |
+| --- | --- | --- | --- |
+| CITY | VARCHAR(64) | N | Carried through from raw |
+| LATITUDE | FLOAT | N | Carried through from raw |
+| LONGITUDE | FLOAT | N | Carried through from raw |
+| WEATHER_DATE | DATE | N | Renamed from raw's `DATE` |
+| TEMP_MAX | FLOAT | Y | Carried through from raw |
+| TEMP_MIN | FLOAT | Y | Carried through from raw |
+| PRECIPITATION | FLOAT | Y | Carried through from raw |
+| WEATHER_CODE | NUMBER(38,0) | Y | Carried through from raw |
+| CITY_DATE | VARCHAR(16777216) | Y | Surrogate key: `CITY \|\| '_' \|\| TO_VARCHAR(DATE, 'YYYY-MM-DD')`; tested `unique` + `not_null` in `models/schema.yml` despite being nullable at the database level |
+
+No declared key (view). `CITY`/`LATITUDE`/`LONGITUDE`/`WEATHER_DATE`
+inherit `NOT NULL` from the raw table's matching columns; `CITY_DATE` is a
+computed expression, which Snowflake always types as nullable regardless of
+its inputs.
 
 ### `DEV.ANALYTICS.weather_analytics` (dbt table -- BI source)
 
-| Column | Type | Description |
-| --- | --- | --- |
-| CITY | VARCHAR | Partition key for every window function |
-| LATITUDE, LONGITUDE | FLOAT | Carried through from raw |
-| WEATHER_DATE | DATE | Calendar date |
-| CITY_DATE | VARCHAR | Surrogate key, tested `unique` + `not_null` |
-| TEMP_MAX, TEMP_MIN, PRECIPITATION, WEATHER_CODE | FLOAT/INTEGER | Carried through from raw |
-| DAILY_AVG_TEMP | FLOAT | `(TEMP_MAX + TEMP_MIN) / 2` |
-| DRY_SPELL_LENGTH | INTEGER | Consecutive dry days (< 0.1mm precip) ending on this date |
-| MOVING_AVG_TEMP_7D | FLOAT | 7-day trailing average of `DAILY_AVG_TEMP`, partitioned by city |
-| TEMP_ANOMALY | FLOAT | `DAILY_AVG_TEMP` minus that city's average over the loaded window |
-| ROLLING_PRECIP_7D | FLOAT | 7-day trailing sum of `PRECIPITATION`, partitioned by city |
+| Column | Type | Nullable | Description |
+| --- | --- | --- | --- |
+| CITY | VARCHAR(64) | Y | Partition key for every window function |
+| LATITUDE | FLOAT | Y | Carried through |
+| LONGITUDE | FLOAT | Y | Carried through |
+| WEATHER_DATE | DATE | Y | Calendar date |
+| CITY_DATE | VARCHAR(16777216) | Y | Surrogate key, tested `unique` + `not_null` |
+| TEMP_MAX | FLOAT | Y | Carried through |
+| TEMP_MIN | FLOAT | Y | Carried through |
+| PRECIPITATION | FLOAT | Y | Carried through |
+| WEATHER_CODE | NUMBER(38,0) | Y | Carried through |
+| DAILY_AVG_TEMP | FLOAT | Y | `(TEMP_MAX + TEMP_MIN) / 2` |
+| DRY_SPELL_LENGTH | NUMBER(18,0) | Y | Consecutive dry days (< 0.1mm precip) ending on this date |
+| MOVING_AVG_TEMP_7D | FLOAT | Y | 7-day trailing average of `DAILY_AVG_TEMP`, `PARTITION BY city`, rounded to 2 decimals |
+| TEMP_ANOMALY | FLOAT | Y | `DAILY_AVG_TEMP` minus that city's average over the loaded window, rounded to 2 decimals |
+| ROLLING_PRECIP_7D | FLOAT | Y | 7-day trailing sum of `PRECIPITATION`, `PARTITION BY city`, rounded to 2 decimals |
+
+No declared key (table, materialized from a `SELECT`). Every column is
+nullable at the database level -- `CREATE TABLE AS SELECT` does not carry
+`NOT NULL` forward from `int_weather_metrics`/`stg_weather`, even though the
+`city_date`/`city`/`weather_date` columns are never actually null in
+practice. Uniqueness and non-null-ness are enforced by the dbt tests in
+`models/schema.yml`, not by the table's DDL.
 
 ### `DEV.SNAPSHOTS.weather_snapshot` (dbt snapshot)
 
-`weather_analytics` columns plus dbt's snapshot metadata
-(`dbt_scd_id`, `dbt_updated_at`, `dbt_valid_from`, `dbt_valid_to`).
-Strategy: `check` on the metric columns, keyed on `CITY_DATE`.
+| Column | Type | Nullable | Description |
+| --- | --- | --- | --- |
+| CITY | VARCHAR(64) | Y | From `weather_analytics` |
+| LATITUDE | FLOAT | Y | From `weather_analytics` |
+| LONGITUDE | FLOAT | Y | From `weather_analytics` |
+| WEATHER_DATE | DATE | Y | From `weather_analytics` |
+| CITY_DATE | VARCHAR(16777216) | Y | Snapshot `unique_key` |
+| TEMP_MAX | FLOAT | Y | Tracked by `check` strategy |
+| TEMP_MIN | FLOAT | Y | Tracked by `check` strategy |
+| PRECIPITATION | FLOAT | Y | Tracked by `check` strategy |
+| WEATHER_CODE | NUMBER(38,0) | Y | Tracked by `check` strategy |
+| DAILY_AVG_TEMP | FLOAT | Y | From `weather_analytics`, not a `check_cols` column |
+| DRY_SPELL_LENGTH | NUMBER(18,0) | Y | From `weather_analytics`, not a `check_cols` column |
+| MOVING_AVG_TEMP_7D | FLOAT | Y | Tracked by `check` strategy |
+| TEMP_ANOMALY | FLOAT | Y | Tracked by `check` strategy |
+| ROLLING_PRECIP_7D | FLOAT | Y | Tracked by `check` strategy |
+| DBT_SCD_ID | VARCHAR(32) | Y | dbt-generated: unique ID for this SCD Type 2 row version |
+| DBT_UPDATED_AT | TIMESTAMP_NTZ(9) | Y | dbt-generated: when this row version was recorded |
+| DBT_VALID_FROM | TIMESTAMP_NTZ(9) | Y | dbt-generated: start of this row version's validity |
+| DBT_VALID_TO | TIMESTAMP_NTZ(9) | Y | dbt-generated: end of this row version's validity (`NULL` = current) |
+
+Snapshot key: `unique_key='city_date'`, `strategy='check'` on
+`[temp_max, temp_min, precipitation, weather_code, moving_avg_temp_7d,
+temp_anomaly, rolling_precip_7d]` (see `snapshots/weather_snapshot.sql`).
+`daily_avg_temp` and `dry_spell_length` are carried through but not in
+`check_cols`, so a change in only those two columns would not, by itself,
+open a new row version.
 
 ## 9. Idempotency Design
 
@@ -271,9 +327,9 @@ range), applied across all four charts at once.
 
 ## 16. Results / Observations
 
-The pipeline was run end-to-end against live data (see Section 20 note on
-verification). As of the run on 2026-09-25/26, over the ~61-day loaded
-window:
+The pipeline was run end-to-end against live data (see Section 18,
+Conclusion, for the full verification summary). As of the run on
+2026-09-25/26, over the ~61-day loaded window:
 
 - Both cities were in the middle of an extended dry spell at the same time:
   Seoul had gone 14 consecutive days with under 0.1mm of precipitation,
@@ -341,11 +397,11 @@ RAW -> dbt -> Snowflake analytics -> BI dashboard with one shared pipeline
 for both cities, and all 10 required screenshots (Airflow Variables and
 Connections, both DAG graph views, the ETL load log, the three dbt task
 logs, and both dashboard views) are captured and present in
-`screenshots/`, embedded throughout this report as Figures 1-10 (Sections 4,
-6, 12, 13, and 15). What remains before submission is administrative, not
-functional or
-evidentiary: filling in the final GitHub repository URL and submission date
-above, and pushing the repository (see repo root `README.md`).
+`screenshots/`, embedded throughout this report as Figures 1-10 (Sections 6,
+12, 13, and 15), alongside the system architecture diagram in Section 4. The
+repository is public at the URL above. What remains before submission is
+purely administrative: filling in the submission date above, if not already
+done.
 
 ## 19. References
 

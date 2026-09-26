@@ -259,6 +259,11 @@ dbt debug && dbt run && dbt snapshot && dbt test
 
 ## Team
 
-[INSERT: team member names, SJSU IDs, and who owned which part -- e.g.
-"originally split by city during development; both members reviewed the
-unified pipeline before submission."]
+- Yunseo Oh (020746206)
+- Isabella Shi (019256965)
+
+Development was initially divided by city -- one member focused on Seoul,
+the other on Toronto -- then merged into the single shared pipeline
+described in this README (one Airflow DAG pair and one dbt project driven
+by the `CITY_CONFIG` Variable, rather than a separate pipeline per city).
+Both members reviewed the unified final pipeline before submission.
