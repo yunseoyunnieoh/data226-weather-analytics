@@ -3,7 +3,7 @@
 **Course:** SJSU DATA 226
 **Team members:** Yunseo Oh (020746206), Isabella Shi (019256965)
 **Repository:** https://github.com/yunseoyunnieoh/data226-weather-analytics
-**Date:** [INSERT SUBMISSION DATE]
+**Date:** September 26, 2026
 
 ---
 
@@ -399,9 +399,8 @@ Connections, both DAG graph views, the ETL load log, the three dbt task
 logs, and both dashboard views) are captured and present in
 `screenshots/`, embedded throughout this report as Figures 1-10 (Sections 6,
 12, 13, and 15), alongside the system architecture diagram in Section 4. The
-repository is public at the URL above. What remains before submission is
-purely administrative: filling in the submission date above, if not already
-done.
+repository is public at the URL above, and the submission date is recorded
+above. This report is complete.
 
 ## 19. References
 
