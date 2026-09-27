@@ -7,7 +7,7 @@
 --                          average over the loaded window (a simple baseline
 --                          anomaly, not a multi-year climatological one)
 --   - rolling_precip_7d  : trailing 7-day sum of precipitation
---   - dry_spell_length   : carried through from int_weather_metrics
+--   - dry_spell_length   : carried through from weather_metrics
 
 select
     city,
@@ -34,4 +34,4 @@ select
         order by weather_date
         rows between 6 preceding and current row
     ), 2) as rolling_precip_7d
-from {{ ref('int_weather_metrics') }}
+from {{ ref('weather_metrics') }}

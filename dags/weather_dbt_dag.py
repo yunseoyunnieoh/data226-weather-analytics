@@ -12,44 +12,51 @@ config, never committed) are mounted into the Airflow containers at
 /opt/airflow/dbt by docker-compose.yaml.
 """
 
-from datetime import timedelta
+from pendulum import datetime
 
-import pendulum
 from airflow import DAG
 from airflow.operators.bash import BashOperator
+from airflow.hooks.base import BaseHook
 
 
 DBT_PROJECT_DIR = "/opt/airflow/dbt"
-DBT_CMD = f"cd {DBT_PROJECT_DIR} && dbt {{command}} --profiles-dir {DBT_PROJECT_DIR}"
+
+conn = BaseHook.get_connection('snowflake_conn')
 
 with DAG(
     dag_id="weather_dbt_dag",
-    description="dbt run -> dbt snapshot -> dbt test for the weather analytics models",
-    start_date=pendulum.datetime(2026, 9, 1, tz="UTC"),
+    description="dbt run -> dbt test -> dbt snapshot for the weather analytics models",
+    start_date=datetime(2026, 9, 1),
     schedule=None,  # triggered only by weather_etl_dag, never on its own schedule
     catchup=False,
     max_active_runs=1,
     default_args={
-        "owner": "data226_team",
-        "retries": 1,
-        "retry_delay": timedelta(minutes=2),
-        "execution_timeout": timedelta(minutes=10),
+        "env": {
+            "DBT_USER": conn.login,
+            "DBT_ACCOUNT": conn.extra_dejson.get("account"),
+            "DBT_PRIVATE_KEY_PASSPHRASE": conn.password,
+            "DBT_PRIVATE_KEY_PATH": conn.extra_dejson.get("private_key_file"),
+            "DBT_DATABASE": conn.extra_dejson.get("database"),
+            "DBT_ROLE": conn.extra_dejson.get("role", "ACCOUNTADMIN"),
+            "DBT_WAREHOUSE": conn.extra_dejson.get("warehouse"),
+            "DBT_TYPE": "snowflake"
+        }
     },
     tags=["DATA226", "weather", "dbt"],
 ) as dag:
     dbt_run = BashOperator(
         task_id="dbt_run",
-        bash_command=DBT_CMD.format(command="run"),
-    )
-
-    dbt_snapshot = BashOperator(
-        task_id="dbt_snapshot",
-        bash_command=DBT_CMD.format(command="snapshot"),
+        bash_command=f"/home/airflow/.local/bin/dbt run --profiles-dir {DBT_PROJECT_DIR} --project-dir {DBT_PROJECT_DIR}",
     )
 
     dbt_test = BashOperator(
         task_id="dbt_test",
-        bash_command=DBT_CMD.format(command="test"),
+        bash_command=f"/home/airflow/.local/bin/dbt test --profiles-dir {DBT_PROJECT_DIR} --project-dir {DBT_PROJECT_DIR}",
     )
 
-    dbt_run >> dbt_snapshot >> dbt_test
+    dbt_snapshot = BashOperator(
+        task_id="dbt_snapshot",
+        bash_command=f"/home/airflow/.local/bin/dbt snapshot --profiles-dir {DBT_PROJECT_DIR} --project-dir {DBT_PROJECT_DIR}",
+    )
+
+    dbt_run >> dbt_test >> dbt_snapshot

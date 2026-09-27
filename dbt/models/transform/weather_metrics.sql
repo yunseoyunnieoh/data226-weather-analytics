@@ -9,7 +9,7 @@
 -- unbroken dry streak. ROW_NUMBER() within that group is the streak length.
 
 with base as (
-    select * from {{ ref('stg_weather') }}
+    select * from {{ ref('weather_daily') }}
 ),
 
 flagged as (

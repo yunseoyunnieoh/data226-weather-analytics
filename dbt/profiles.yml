@@ -10,16 +10,16 @@
 # path on your machine, e.g. ~/.snowflake/data226_team/rsa_key.p8.
 
 weather_analytics:
-  target: dev
   outputs:
     dev:
-      type: snowflake
-      account: YOUR_ACCOUNT_LOCATOR
-      user: YOUR_SNOWFLAKE_USERNAME
-      role: YOUR_ROLE
-      private_key_path: /opt/airflow/snowflake_keys/rsa_key.p8
-      private_key_passphrase: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PASSPHRASE') }}"
-      database: DEV
-      warehouse: COMPUTE_WH
+      account: "{{ env_var('DBT_ACCOUNT') }}"
+      database: "{{ env_var('DBT_DATABASE') }}"
+      private_key_passphrase: "{{ env_var('DBT_PRIVATE_KEY_PASSPHRASE') }}"
+      private_key_path: "{{ env_var('DBT_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('DBT_ROLE') }}"
+      threads: 1
       schema: analytics
-      threads: 4
+      type: "{{ env_var('DBT_TYPE') }}"
+      user: "{{ env_var('DBT_USER') }}"
+      warehouse: "{{ env_var('DBT_WAREHOUSE') }}"
+  target: dev

@@ -191,7 +191,6 @@ this repo.
 git clone <this repo>
 cd data226-weather-analytics
 cp .env.example .env                    # fill in SNOWFLAKE_KEY_DIR and the passphrase
-cp dbt/profiles.yml.example dbt/profiles.yml   # fill in your Snowflake account/user
 ```
 
 ### Required Airflow Variables
