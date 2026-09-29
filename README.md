@@ -38,14 +38,13 @@ Open-Meteo API --> Airflow ETL DAG --> Snowflake RAW
 ├── .env.example              # copy to .env; holds no real secrets
 ├── dags/
 │   ├── weather_etl_dag.py    # extract -> transform -> load, then triggers the dbt DAG
-│   └── weather_dbt_dag.py    # dbt run -> dbt snapshot -> dbt test
+│   └── weather_dbt_dag.py    # dbt run -> dbt test -> dbt snapshot
 ├── dbt/
 │   ├── dbt_project.yml
-│   ├── profiles.yml.example  # copy to profiles.yml (gitignored); never commit real one
+│   ├── profiles.yml          # reads env_var('DBT_*'); no personal values, safe to commit
 │   ├── models/
-│   │   ├── staging/          # stg_weather.sql + source.yml
-│   │   ├── intermediate/     # int_weather_metrics.sql
-│   │   ├── analytics/        # weather_analytics.sql
+│   │   ├── transform/        # source.yml, weather_daily.sql, weather_metrics.sql (ephemeral)
+│   │   ├── analytics/        # weather_analytics.sql (table)
 │   │   └── schema.yml        # tests
 │   └── snapshots/
 │       └── weather_snapshot.sql
@@ -70,60 +69,77 @@ Both cities are defined in a single Airflow Variable, `CITY_CONFIG`:
 ```
 
 `weather_etl_dag.py` loops over this JSON, so adding a third city requires
-adding one entry here -- no DAG or dbt code changes.
+adding one entry here, plus the new city name in the `accepted_values` test
+in `dbt/models/schema.yml`.
 
 ## Pipeline
 
 1. **`weather_etl_dag`** (`dags/weather_etl_dag.py`, TaskFlow API):
    - `extract`: one Open-Meteo request per city (`past_days=60,
      forecast_days=1`).
-   - `transform`: flattens each city's response into rows, validates array
-     lengths, rejects empty batches.
-   - `load`: upserts rows into `DEV.RAW.CITY_WEATHER_DAILY` via a `MERGE`
-     keyed on `(city, date)`, inside an explicit `BEGIN`/`COMMIT`
-     transaction with a duplicate-key check before commit and a `ROLLBACK`
-     + re-raise on any failure. See [Idempotency](#idempotency).
+   - `transform`: flattens each city's response into
+     `(city, latitude, longitude, date, temp_max, temp_min, precipitation, weather_code)` rows.
+   - `load`: creates the `RAW` schema and `RAW.CITY_WEATHER_DAILY` if they
+     don't exist, then replaces the table's contents with `DELETE` + `INSERT`
+     inside a `BEGIN`/`COMMIT` transaction, with `ROLLBACK` + re-raise on any
+     failure. See [Idempotency](#idempotency).
    - Final task `trigger_dbt_dag` starts `weather_dbt_dag`.
 2. **`weather_dbt_dag`** (`dags/weather_dbt_dag.py`, `schedule=None`, only
-   ever triggered by DAG 1): `dbt run -> dbt snapshot -> dbt test` via
+   ever triggered by DAG 1): `dbt run -> dbt test -> dbt snapshot` via
    `BashOperator`, against the dbt project mounted at `/opt/airflow/dbt`.
+   Snowflake credentials are read from the `snowflake_conn` Airflow
+   Connection and passed to dbt as `DBT_*` environment variables, so both
+   DAGs share one set of credentials.
+
+Both DAGs use `max_active_runs=1`, so two loads can never run against the
+table at the same time.   
 
 ## Idempotency
 
 Snowflake does not enforce declared `PRIMARY KEY` constraints on standard
 tables, so idempotency comes from application logic, not the DDL:
 
-- Rows are staged, then `MERGE`d on `(city, date)` -- a rerun for a date
-  that already exists **updates** that row instead of inserting a second
-  copy.
-- A `SELECT ... GROUP BY city, date HAVING COUNT(*) > 1` check runs before
-  `COMMIT` as an explicit verification, not an assumption.
-- Any exception triggers `ROLLBACK` and is re-raised (never swallowed), so
-  Airflow correctly marks the task as failed.
+- `DELETE FROM RAW.CITY_WEATHER_DAILY` followed by an `INSERT` of every
+  extracted row means each run leaves the table holding exactly the current
+  61-day window (past 60 days plus today) for each city. 
+  Running the DAG twice in a row gives the same result:
+  2 cities x 61 days = 122 rows both times.
+- `CREATE SCHEMA` / `CREATE TABLE IF NOT EXISTS` run before `BEGIN`, because
+  Snowflake DDL auto-commits and would otherwise end the transaction early.
+- Any exception triggers `ROLLBACK` and is re-raised (never silently treated),
+  so the previous data is kept and Airflow correctly marks the task as failed.
 
 ## dbt
 
-`dbt/README.md` has the full breakdown. Summary: `stg_weather` (view) ->
-`int_weather_metrics` (ephemeral) -> `weather_analytics` (table), all window
+`dbt/README.md` has the full breakdown. Summary: `weather_daily` (ephemeral)
+-> `weather_metrics` (ephemeral) -> `weather_analytics` (table), all window
 functions `PARTITION BY city`. Metrics: daily average temperature, 7-day
 moving average temperature, temperature anomaly, 7-day rolling
-precipitation, dry spell length. One snapshot (`weather_snapshot`, `check`
-strategy) and schema tests (`unique`/`not_null` on the city+date key,
-`not_null` on city/date, `accepted_values` on city).
+precipitation, dry spell length. Schema tests on `weather_analytics`:
+`unique`/`not_null` on the city+date key, `not_null` on city/date,
+`accepted_values` on city.
+
+One snapshot (`weather_snapshot`, `check` strategy) tracks changes to the
+raw weather columns (`temp_max`, `temp_min`, `precipitation`,
+`weather_code`). A new version is recorded only when Open-Meteo revises a
+day's values or a day ages out of the 61-day window. The computed metrics are
+stored in the snapshot but don't trigger new versions, because they shift
+whenever the window moves even when the underlying data hasn't changed.
 
 ## Snowflake tables
 
-See `docs/report.md` Section 8 for full column-level detail. Short version:
+See `docs/report.md` Section 8 for full column-level detail. All tables are
+created in the database set on the `snowflake_conn` Connection:
 
-- `DEV.RAW.CITY_WEATHER_DAILY` -- raw landing table, PK `(city, date)`.
-- `DEV.ANALYTICS.weather_analytics` -- dbt's final table, source for BI.
-- `DEV.SNAPSHOTS.weather_snapshot` -- dbt snapshot of the analytics table.
+- `RAW.CITY_WEATHER_DAILY` -- raw landing table, PK `(city, date)`.
+- `ANALYTICS.WEATHER_ANALYTICS` -- dbt's final table, source for BI.
+- `SNAPSHOTS.WEATHER_SNAPSHOT` -- dbt snapshot of the analytics table.
 
 ## Dashboard
 
 **Status: complete.** **Tool:** [Preset](https://preset.io) (cloud-hosted
 Apache Superset). **Team/Workspace:** "DATA 226 Weather Analytics" /
-"Weather Analytics Lab". **Dataset:** `DEV.ANALYTICS.WEATHER_ANALYTICS`.
+"Weather Analytics Lab". **Dataset:** `ANALYTICS.WEATHER_ANALYTICS`.
 
 **Authentication note (differs from the original plan below):** Preset's
 basic connection form expects Snowflake username + password, but this
@@ -172,7 +188,8 @@ this repo.
    ...}}` per Snowflake's SQLAlchemy connector docs) -- never paste the key
    into a field that gets saved to a file you might commit.
    - Account: your Snowflake account locator
-   - Warehouse: `COMPUTE_WH`, Database: `DEV`, Role: your role
+   - Warehouse and Database: the same ones you set on `snowflake_conn`
+   - Role: your role
    - Test the connection, then Save.
 3. **Datasets** -> **+ Dataset** -> schema `ANALYTICS`, table
    `WEATHER_ANALYTICS`.
@@ -190,9 +207,12 @@ this repo.
 ```bash
 git clone <this repo>
 cd data226-weather-analytics
-cp .env.example .env                    # fill in SNOWFLAKE_KEY_DIR and the passphrase
-cp dbt/profiles.yml.example dbt/profiles.yml   # fill in your Snowflake account/user
+cp .env.example .env                    # fill in SNOWFLAKE_KEY_DIR
 ```
+
+`SNOWFLAKE_KEY_DIR` is the absolute path to the **folder** containing your
+`rsa_key.p8` (not the path to the file itself). It is mounted read-only into
+the containers at `/opt/airflow/snowflake_keys`.
 
 ### Required Airflow Variables
 
@@ -204,7 +224,7 @@ cp dbt/profiles.yml.example dbt/profiles.yml   # fill in your Snowflake account/
 
 | Connection Id | Type | Notes |
 | --- | --- | --- |
-| `snowflake_conn` | Snowflake | Key-pair auth. Login = your Snowflake user, Password = your private key's passphrase, Private Key (Path) = `/opt/airflow/snowflake_keys/rsa_key.p8` (mounted from `SNOWFLAKE_KEY_DIR` in `.env`), Warehouse = `COMPUTE_WH`, Database = `DEV`, Schema = `RAW`. |
+| `snowflake_conn` | Snowflake | Key-pair auth. Login = your Snowflake user, Password = your private key's passphrase, Account = your account identifier, Warehouse = your warehouse, Database = your database, Role = your role, Private Key (Path) = `/opt/airflow/snowflake_keys/rsa_key.p8`. Both DAGs read everything from this connection, so fill in every field. |
 
 ### How to run Airflow
 
@@ -214,39 +234,45 @@ docker compose exec airflow airflow dags list-import-errors   # should be empty
 ```
 
 `docker-compose.yaml` maps the webserver to `${AIRFLOW_HOST_PORT:-8081}`, so
-it defaults to `http://localhost:8081` if `AIRFLOW_HOST_PORT` isn't set.
-**This project's actual verified run used `http://localhost:8082`**,
-because port 8081 was already occupied by the separate HW3 Airflow stack
-running on the same machine -- `.env` sets `AIRFLOW_HOST_PORT=8082` to avoid
-that conflict. If you don't have anything else on 8081, you can drop that
-line from `.env` and use the default. Open whichever port applies (default
-login `airflow` / `airflow` unless you changed `_AIRFLOW_WWW_USER_*` in
-`.env`), set the Variable and Connection above, unpause `weather_etl_dag`,
-and trigger it. `weather_dbt_dag` starts automatically after `load`
-succeeds.
+it defaults to `http://localhost:8081`. If 8081 is already in use on your
+machine (for example by another course Airflow stack), set
+`AIRFLOW_HOST_PORT=8082` in `.env`. Log in with `airflow` / `airflow` unless
+you changed `_AIRFLOW_WWW_USER_*` in `.env`, then:
+
+1. Add the Variable and Connection above.
+2. Unpause `weather_dbt_dag`, then `weather_etl_dag`.
 
 ### How to run dbt
 
-Either let `weather_dbt_dag` run it inside the container, or run it locally:
+Either let `weather_dbt_dag` run it inside the container, or run it locally.
+Outside Airflow, nothing sets the `DBT_*` variables that `profiles.yml`
+reads, so export them first:
 
 ```bash
 cd dbt
 python3 -m venv venv && source venv/bin/activate
 pip install dbt-core==1.8.7 dbt-snowflake==1.8.1
-export SNOWFLAKE_PRIVATE_KEY_PASSPHRASE=your_passphrase
-dbt debug && dbt run && dbt snapshot && dbt test
+
+export DBT_ACCOUNT=your_account DBT_USER=your_user
+export DBT_DATABASE=your_database DBT_WAREHOUSE=your_warehouse DBT_ROLE=your_role
+export DBT_TYPE=snowflake
+export DBT_PRIVATE_KEY_PATH="/absolute/path/to/rsa_key.p8"
+export DBT_PRIVATE_KEY_PASSPHRASE=your_passphrase
+
+dbt debug && dbt run && dbt test && dbt snapshot
 ```
 
 ## Security / secrets
 
 - No password, private key, or account identifier is hardcoded anywhere in
-  `dags/` or `dbt/`.
-- `dbt/profiles.yml`, `.env`, and any `*.p8`/`*.pub`/`*.pem` key file are
-  gitignored (see `.gitignore`). Only `.example` versions with placeholder
-  values are committed.
+  `dags/` or `dbt/`. `dbt/profiles.yml` is committed, but it only contains
+  `env_var()` references.
+- `.env` and any `*.p8`/`*.pub`/`*.pem` key file are gitignored (see
+  `.gitignore`). Only `.env.example` with placeholder values is committed.
 - The Snowflake private key lives on the host filesystem and is mounted
   **read-only** into the Airflow containers; it is never copied into the
-  repo or pasted into a committed file.
+  repo or pasted into a committed file. Its passphrase is stored only in the
+  `snowflake_conn` Airflow Connection.
 - Preset's connection to Snowflake uses the same key-pair credentials,
   entered directly into Preset's **Advanced -> Security -> Secure Extra**
   field in the browser (see [Dashboard](#dashboard)). That field lives only

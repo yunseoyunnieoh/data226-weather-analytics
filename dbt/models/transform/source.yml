@@ -2,7 +2,6 @@ version: 2
 
 sources:
   - name: raw
-    database: dev
     schema: raw
     description: "Raw weather rows loaded by dags/weather_etl_dag.py from the Open-Meteo forecast API"
     tables:

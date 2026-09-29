@@ -5,10 +5,7 @@
     target_schema='snapshots',
     unique_key='city_date',
     strategy='check',
-    check_cols=[
-        'temp_max', 'temp_min', 'precipitation', 'weather_code',
-        'moving_avg_temp_7d', 'temp_anomaly', 'rolling_precip_7d'
-    ],
+    check_cols=['temp_max', 'temp_min', 'precipitation', 'weather_code'],
     invalidate_hard_deletes=True
   )
 }}
