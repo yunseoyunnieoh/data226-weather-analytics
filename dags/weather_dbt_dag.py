@@ -1,15 +1,16 @@
 """DATA 226 Team Lab: dbt orchestration DAG.
 
-Runs the dbt project against DEV.RAW.CITY_WEATHER_DAILY: dbt run builds the
-staging/intermediate/analytics models, dbt snapshot captures the analytics
-table's current state for change tracking, and dbt test validates the
-result. This DAG is never scheduled on its own -- weather_etl_dag triggers
-it (see trigger_dbt_dag task there) so dbt always runs after a fresh load,
-never independently or before the ETL succeeds.
+Runs the dbt project against RAW.CITY_WEATHER_DAILY: dbt run builds the
+transform/analytics models, dbt test validates the result, and dbt snapshot
+captures the analytics table's current state for change tracking. This DAG
+is never scheduled on its own -- weather_etl_dag triggers it (see
+trigger_dbt_dag task there) so dbt always runs after a fresh load, never
+independently or before the ETL succeeds.
 
-The dbt project and its profiles.yml (gitignored, holds Snowflake key-pair
-config, never committed) are mounted into the Airflow containers at
-/opt/airflow/dbt by docker-compose.yaml.
+The dbt project and its profiles.yml (reads Snowflake key-pair config from
+DBT_* environment variables, committed since it holds no secrets) are
+mounted into the Airflow containers at /opt/airflow/dbt by
+docker-compose.yaml.
 """
 
 from pendulum import datetime

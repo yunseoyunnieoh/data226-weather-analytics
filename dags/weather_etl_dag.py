@@ -2,12 +2,13 @@
 
 Extracts daily weather for every city listed in the CITY_CONFIG Airflow
 Variable from the Open-Meteo forecast API, then loads it into
-DEV.RAW.CITY_WEATHER_DAILY with a transaction-safe MERGE (upsert), so the
-same code handles any number of cities without a separate pipeline per city.
+RAW.CITY_WEATHER_DAILY with a transaction-safe full refresh (DELETE +
+INSERT), so the same code handles any number of cities without a separate
+pipeline per city.
 
 Adapted from the HW3 solution (weather_to_snowflake_airflow.py): same
 TaskFlow (extract -> transform -> load) shape, same
-BEGIN/verify/COMMIT/ROLLBACK transaction discipline, and the same
+BEGIN/COMMIT/ROLLBACK transaction discipline, and the same
 create-table-before-BEGIN ordering (Snowflake DDL auto-commits).
 
 Airflow Variables:

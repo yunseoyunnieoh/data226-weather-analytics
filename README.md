@@ -24,7 +24,7 @@ Full diagram and narrative: [`docs/architecture.md`](docs/architecture.md).
 
 ```
 Open-Meteo API --> Airflow ETL DAG --> Snowflake RAW
-    --> [triggers] --> Airflow dbt DAG --> dbt staging/intermediate/analytics
+    --> [triggers] --> Airflow dbt DAG --> dbt transform/analytics
     --> Snowflake analytics layer --> BI dashboard
 ```
 

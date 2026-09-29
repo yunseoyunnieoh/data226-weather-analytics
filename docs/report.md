@@ -52,7 +52,7 @@ duplicating the ETL and transformation logic per city.
 | Orchestration | Two DAGs: `weather_etl_dag` (schedule) -> `weather_dbt_dag` (triggered, `schedule=None`) | Makes the ETL-before-dbt dependency explicit and inspectable in the Airflow UI, not just implied by cron timing |
 | Raw table | `RAW.CITY_WEATHER_DAILY`, PK `(city, date)` | New table name, distinct from the single-city HW2/HW3 `WEATHER_DAILY` table, to avoid touching already-graded data with an incompatible schema |
 | Idempotency | Full refresh: `DELETE` + `INSERT` inside `BEGIN`/`COMMIT`, `ROLLBACK` + re-raise on failure | Every run leaves the table holding exactly the current 61-day window per city, so reruns cannot create duplicates |
-| dbt layers | `weather_daily` (ephemeral) -> `weather_metrics` (ephemeral) -> `weather_analytics` (table), in `models/transform/` and `models/analytics/` |
+| dbt layers | `weather_daily` (ephemeral) -> `weather_metrics` (ephemeral) -> `weather_analytics` (table), in `models/transform/` and `models/analytics/` | Ephemeral models inline as CTEs with no intermediate tables, so only the final analytics table is materialized in Snowflake |
 | Snapshot | `weather_snapshot`, `strategy='check'` on the raw weather columns of `weather_analytics` | No natural `updated_at` column exists, and Open-Meteo revises very recent days as more observations arrive, so `check` is more appropriate than `timestamp` |
 | BI tool | [Preset](https://preset.io) (cloud-hosted Apache Superset) | Free tier, no local install/Docker needed, connects directly to Snowflake |
 
@@ -230,8 +230,9 @@ in `load()` (`dags/weather_etl_dag.py`) with full-refresh pattern:
    anywhere in the block triggers `ROLLBACK` and re-raises, so the previous
    data is kept and Airflow marks the task failed.
 
-Net effect: running the DAG twice for the same date updates that date's row
-in place rather than appending a second copy.
+Net effect: running the DAG twice replaces the whole table's contents with
+the current 61-day window per city, rather than appending a second copy of
+each row.
 
 ## 10. dbt Implementation
 
