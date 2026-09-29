@@ -3,7 +3,7 @@
 **Course:** SJSU DATA 226
 **Team members:** Yunseo Oh (020746206), Isabella Shi (019256965)
 **Repository:** https://github.com/yunseoyunnieoh/data226-weather-analytics
-**Date:** September 26, 2026
+**Date:** September 29, 2026
 
 ---
 
@@ -46,13 +46,14 @@ duplicating the ETL and transformation logic per city.
 
 | Component | Choice | Why |
 | --- | --- | --- |
-| Source API | Open-Meteo `/v1/forecast`, `past_days=60`, `forecast_days=1` | Required endpoint; `past_days` gives enough trailing history in one request per city for 7-day windows and an anomaly baseline |
+| Source API | Open-Meteo `/v1/forecast`, `past_days=60`, `forecast_days=1` | Required endpoint; `past_days` gives enough trailing history in one request per city for 7-day windows and an anomaly baseline, and `forecast_days=1` includes today, for 61 days per city |
 | City config | Airflow Variable `CITY_CONFIG` (JSON: name -> lat/lon/timezone) | Adding a city means adding one JSON entry, no code change |
+| Credentials | Airflow Connection `snowflake_conn`, shared by both DAGs | One place for all Snowflake settings; the dbt DAG passes them to dbt as `DBT_*` environment variables, so no account, database, or secret is written in the repo |
 | Orchestration | Two DAGs: `weather_etl_dag` (schedule) -> `weather_dbt_dag` (triggered, `schedule=None`) | Makes the ETL-before-dbt dependency explicit and inspectable in the Airflow UI, not just implied by cron timing |
-| Raw table | `DEV.RAW.CITY_WEATHER_DAILY`, PK `(city, date)` | New table name, distinct from the single-city HW2/HW3 `WEATHER_DAILY` table, to avoid touching already-graded data with an incompatible schema |
-| Idempotency | `MERGE` keyed on `(city, date)` inside `BEGIN`/`COMMIT`, with a duplicate-key check before `COMMIT` | Snowflake does not enforce declared primary keys on standard tables, so uniqueness is enforced by the merge logic and verified explicitly, not assumed from the DDL |
-| dbt layers | `stg_weather` (view) -> `int_weather_metrics` (ephemeral) -> `weather_analytics` (table) | Mirrors the layering used in the team's HW4 dbt project |
-| Snapshot | `weather_snapshot`, `strategy='check'` on `weather_analytics` | No natural `updated_at` column exists, and Open-Meteo revises very recent days as more observations arrive, so `check` is more appropriate than `timestamp` |
+| Raw table | `RAW.CITY_WEATHER_DAILY`, PK `(city, date)` | New table name, distinct from the single-city HW2/HW3 `WEATHER_DAILY` table, to avoid touching already-graded data with an incompatible schema |
+| Idempotency | Full refresh: `DELETE` + `INSERT` inside `BEGIN`/`COMMIT`, `ROLLBACK` + re-raise on failure | Every run leaves the table holding exactly the current 61-day window per city, so reruns cannot create duplicates |
+| dbt layers | `weather_daily` (ephemeral) -> `weather_metrics` (ephemeral) -> `weather_analytics` (table), in `models/transform/` and `models/analytics/` |
+| Snapshot | `weather_snapshot`, `strategy='check'` on the raw weather columns of `weather_analytics` | No natural `updated_at` column exists, and Open-Meteo revises very recent days as more observations arrive, so `check` is more appropriate than `timestamp` |
 | BI tool | [Preset](https://preset.io) (cloud-hosted Apache Superset) | Free tier, no local install/Docker needed, connects directly to Snowflake |
 
 ## 4. Architecture
@@ -61,32 +62,31 @@ Full Mermaid source and narrative notes: `docs/architecture.md`. Rendered
 diagram:
 
 **System Architecture Diagram.** Open-Meteo -> Airflow ETL DAG -> Snowflake
-RAW -> (triggered) Airflow dbt DAG -> dbt staging/intermediate/analytics ->
-Snowflake analytics layer -> Preset dashboard, with the `CITY_CONFIG`
-Variable and `snowflake_conn` Connection feeding the ETL DAG and the
+RAW -> (triggered) Airflow dbt DAG -> dbt transform/analytics -> Snowflake
+analytics layer -> Preset dashboard, with the `CITY_CONFIG` Variable feeding
+the ETL DAG, the `snowflake_conn` Connection feeding both DAGs, and the
 `weather_snapshot` snapshot sitting alongside the analytics table.
 
-![System architecture diagram: Open-Meteo API through Airflow ETL, Snowflake RAW, the triggered dbt DAG, dbt's staging/intermediate/analytics layers, the Snowflake snapshot, and the Preset dashboard](architecture_diagram.png)
+![System architecture diagram: Open-Meteo API through Airflow ETL, Snowflake RAW, the triggered dbt DAG, dbt's transform and analytics layers, the Snowflake snapshot, and the Preset dashboard](architecture_diagram.png)
 
 ![Figure 1. weather_etl_dag graph view: extract, transform, load, trigger_dbt_dag all succeeded](../screenshots/03_etl_dag_graph.png)
 
-![Figure 2. weather_dbt_dag graph view: dbt_run, dbt_snapshot, dbt_test all succeeded](../screenshots/05_dbt_dag_graph.png)
+![Figure 2. weather_dbt_dag graph view: dbt_run, dbt_test, dbt_snapshot all succeeded](../screenshots/05_dbt_dag_graph.png)
 
 ## 5. Data Flow
 
 1. `weather_etl_dag.extract()` reads `CITY_CONFIG`, calls Open-Meteo once
-   per city, returns raw JSON payloads.
+   per city, and returns each city's daily data.
 2. `weather_etl_dag.transform()` flattens each city's daily arrays into
    `(city, latitude, longitude, date, temp_max, temp_min, precipitation,
-   weather_code)` rows, validating array lengths and rejecting an empty
-   batch.
-3. `weather_etl_dag.load()` upserts those rows into
-   `DEV.RAW.CITY_WEATHER_DAILY` via a staged `MERGE` inside one transaction,
-   then triggers `weather_dbt_dag`.
-4. `weather_dbt_dag` runs `dbt run` (builds `stg_weather`,
-   `int_weather_metrics`, `weather_analytics`), then `dbt snapshot`
-   (`weather_snapshot`), then `dbt test`.
-5. The BI tool queries `DEV.ANALYTICS.WEATHER_ANALYTICS` directly.
+   weather_code)` rows.
+3. `weather_etl_dag.load()` replaces the contents of
+   `RAW.CITY_WEATHER_DAILY` with those rows (`DELETE` + `INSERT`) inside one
+   transaction, then `trigger_dbt_dag` starts `weather_dbt_dag`.
+4. `weather_dbt_dag` runs `dbt run` (builds `weather_analytics`, with
+   `weather_daily` and `weather_metrics`), then `dbt test`,
+   then `dbt snapshot` (`weather_snapshot`).
+5. The BI tool queries `ANALYTICS.WEATHER_ANALYTICS` directly.
 
 ## 6. Airflow Implementation
 
@@ -96,7 +96,7 @@ Variable and `snowflake_conn` Connection feeding the ETL DAG and the
   `trigger_dbt_dag` (`TriggerDagRunOperator`) starts `weather_dbt_dag` after
   `load` succeeds.
 - **DAG 2 -- `weather_dbt_dag`** (`dags/weather_dbt_dag.py`): three
-  `BashOperator` tasks, `dbt_run -> dbt_snapshot -> dbt_test`, each invoking
+  `BashOperator` tasks, `dbt_run -> dbt_test -> dbt_snapshot`, each invoking
   `dbt <command> --profiles-dir /opt/airflow/dbt` against the dbt project
   mounted into the container. `schedule=None`: this DAG never runs on its
   own timer, only via the trigger from DAG 1.
@@ -104,36 +104,45 @@ Variable and `snowflake_conn` Connection feeding the ETL DAG and the
   `{latitude, longitude, timezone}`.
 - **Airflow Connection**: `snowflake_conn`, type Snowflake, key-pair
   authentication (private key file mounted read-only into the container;
-  passphrase stored only in the Connection's Password field / a local
-  `.env`, never in code).
+  passphrase stored only in the Connection's Password field, never in code
+  or files). The ETL DAG uses it through `SnowflakeHook`. The dbt DAG reads
+  it with `BaseHook.get_connection('snowflake_conn')` and passes the values
+  to dbt as `DBT_*` environment variables, which `dbt/profiles.yml` reads
+  with `env_var()`.
 - **Exception handling**: `load()` wraps the transaction in
-  `try/except/finally`; on any exception it issues `ROLLBACK`, logs the
-  outcome, and **re-raises** so the Airflow task is correctly marked failed
-  (no silent swallowing). `extract()`/`transform()` raise `ValueError` on
-  malformed API responses or empty batches rather than loading partial data.
+  `try/except`; on any exception it issues `ROLLBACK`, prints the error,
+  and **re-raises** so the Airflow task is correctly marked failed (no
+  silent swallowing). `extract()` calls `raise_for_status()` on each API
+  response, so an HTTP error fails the task before anything is loaded.
 
 ![Figure 3. Airflow Admin > Variables: CITY_CONFIG with the Seoul/Toronto JSON](../screenshots/01_airflow_variables.png)
 
 ![Figure 4. Airflow Admin > Connections: snowflake_conn (type "snowflake"), with no host/port/secret values exposed](../screenshots/02_snowflake_connection.png)
 
-![Figure 5. weather_etl_dag "load" task log: BEGIN, COMMIT succeeded, Duplicate (city, date) keys: 0, Seoul: 61 rows, Toronto: 61 rows](../screenshots/04_etl_load_log.png)
+![Figure 5. RAW.CITY_WEATHER_DAILY row counts per city after the 2026-09-29 scheduled load: Seoul 61 rows (2026-07-31 to 2026-09-29), Toronto 61 rows (2026-07-30 to 2026-09-28). The full-refresh load always leaves exactly 61 rows per city](../screenshots/04_etl_load_log.png)
 
 ## 7. Snowflake Design
 
-Database `DEV`, schema `RAW` for the landing table, schema `ANALYTICS` for
-dbt's output, schema `SNAPSHOTS` for the dbt snapshot. See `sql/create_tables.sql`
-for the raw table DDL (also embedded in `weather_etl_dag.py`'s `load()` so
-the pipeline is self-provisioning).
+All objects live in the database set on the `snowflake_conn` Connection;
+no database name appears in the DAGs or the dbt project. Schema `RAW` holds
+the landing table, schema `ANALYTICS` holds dbt's output, and schema
+`SNAPSHOTS` holds the dbt snapshot. The ETL DAG creates `RAW` and the raw
+table if they don't exist, and dbt creates `ANALYTICS` and `SNAPSHOTS`, so
+the pipeline runs on a database with no existing schemas. See
+`sql/create_tables.sql` for the raw table DDL (also embedded in
+`weather_etl_dag.py`'s `load()` so the pipeline is self-provisioning).
 
 ## 8. Table Structures
 
-All four tables below were inspected directly in the live Snowflake account
+All three tables below were inspected directly in the live Snowflake account
 (`DESC TABLE`) to confirm actual column types and nullability, not assumed
 from the DDL/model SQL alone -- Snowflake sometimes normalizes or relaxes
 both (e.g. `INTEGER` is stored as `NUMBER(38,0)`; `CREATE TABLE AS SELECT`
-makes every output column nullable regardless of the source).
+makes every output column nullable regardless of the source). The two
+transform models, `weather_daily` and `weather_metrics`, are ephemeral, so
+they have no table or view in Snowflake.
 
-### `DEV.RAW.CITY_WEATHER_DAILY` (raw, loaded by Airflow)
+### `RAW.CITY_WEATHER_DAILY` (raw, loaded by Airflow)
 
 | Column | Type | Nullable | Constraint | Description |
 | --- | --- | --- | --- | --- |
@@ -145,39 +154,22 @@ makes every output column nullable regardless of the source).
 | TEMP_MIN | FLOAT | Y | -- | Daily min temperature, Celsius |
 | PRECIPITATION | FLOAT | Y | -- | Daily precipitation total, mm |
 | WEATHER_CODE | NUMBER(38,0) | Y | -- | WMO weather interpretation code (declared `INTEGER`; Snowflake stores all integers as `NUMBER(38,0)`) |
-| LOADED_AT | TIMESTAMP_NTZ(9) | Y | default `CURRENT_TIMESTAMP()` | Last upsert time for this row |
+| LOADED_AT | TIMESTAMP_NTZ(9) | Y | default `CURRENT_TIMESTAMP()` | Time the row was inserted by the most recent load |
 
 Declared key: `PRIMARY KEY (CITY, DATE)` (declarative only in Snowflake;
-enforced by the `MERGE` + duplicate-check in `load()`, not by the database).
+the full-refresh load means each `(city, date)` is inserted exactly once per
+run, and the `unique` test on `city_date` in `weather_analytics` verifies
+it downstream).
 
-### `DEV.ANALYTICS.stg_weather` (dbt view)
-
-| Column | Type | Nullable | Description |
-| --- | --- | --- | --- |
-| CITY | VARCHAR(64) | N | Carried through from raw |
-| LATITUDE | FLOAT | N | Carried through from raw |
-| LONGITUDE | FLOAT | N | Carried through from raw |
-| WEATHER_DATE | DATE | N | Renamed from raw's `DATE` |
-| TEMP_MAX | FLOAT | Y | Carried through from raw |
-| TEMP_MIN | FLOAT | Y | Carried through from raw |
-| PRECIPITATION | FLOAT | Y | Carried through from raw |
-| WEATHER_CODE | NUMBER(38,0) | Y | Carried through from raw |
-| CITY_DATE | VARCHAR(16777216) | Y | Surrogate key: `CITY \|\| '_' \|\| TO_VARCHAR(DATE, 'YYYY-MM-DD')`; tested `unique` + `not_null` in `models/schema.yml` despite being nullable at the database level |
-
-No declared key (view). `CITY`/`LATITUDE`/`LONGITUDE`/`WEATHER_DATE`
-inherit `NOT NULL` from the raw table's matching columns; `CITY_DATE` is a
-computed expression, which Snowflake always types as nullable regardless of
-its inputs.
-
-### `DEV.ANALYTICS.weather_analytics` (dbt table -- BI source)
+### `ANALYTICS.WEATHER_ANALYTICS` (dbt table -- BI source)
 
 | Column | Type | Nullable | Description |
 | --- | --- | --- | --- |
 | CITY | VARCHAR(64) | Y | Partition key for every window function |
 | LATITUDE | FLOAT | Y | Carried through |
 | LONGITUDE | FLOAT | Y | Carried through |
-| WEATHER_DATE | DATE | Y | Calendar date |
-| CITY_DATE | VARCHAR(16777216) | Y | Surrogate key, tested `unique` + `not_null` |
+| WEATHER_DATE | DATE | Y | Calendar date (renamed from raw's `DATE` in `weather_daily`) |
+| CITY_DATE | VARCHAR(16777216) | Y | Surrogate key `CITY \|\| '_' \|\| TO_VARCHAR(DATE, 'YYYY-MM-DD')`, built in `weather_daily`; tested `unique` + `not_null` |
 | TEMP_MAX | FLOAT | Y | Carried through |
 | TEMP_MIN | FLOAT | Y | Carried through |
 | PRECIPITATION | FLOAT | Y | Carried through |
@@ -190,12 +182,12 @@ its inputs.
 
 No declared key (table, materialized from a `SELECT`). Every column is
 nullable at the database level -- `CREATE TABLE AS SELECT` does not carry
-`NOT NULL` forward from `int_weather_metrics`/`stg_weather`, even though the
+`NOT NULL` forward from the raw table, even though the
 `city_date`/`city`/`weather_date` columns are never actually null in
 practice. Uniqueness and non-null-ness are enforced by the dbt tests in
 `models/schema.yml`, not by the table's DDL.
 
-### `DEV.SNAPSHOTS.weather_snapshot` (dbt snapshot)
+### `SNAPSHOTS.WEATHER_SNAPSHOT` (dbt snapshot)
 
 | Column | Type | Nullable | Description |
 | --- | --- | --- | --- |
@@ -210,36 +202,33 @@ practice. Uniqueness and non-null-ness are enforced by the dbt tests in
 | WEATHER_CODE | NUMBER(38,0) | Y | Tracked by `check` strategy |
 | DAILY_AVG_TEMP | FLOAT | Y | From `weather_analytics`, not a `check_cols` column |
 | DRY_SPELL_LENGTH | NUMBER(18,0) | Y | From `weather_analytics`, not a `check_cols` column |
-| MOVING_AVG_TEMP_7D | FLOAT | Y | Tracked by `check` strategy |
-| TEMP_ANOMALY | FLOAT | Y | Tracked by `check` strategy |
-| ROLLING_PRECIP_7D | FLOAT | Y | Tracked by `check` strategy |
+| MOVING_AVG_TEMP_7D | FLOAT | Y | From `weather_analytics`, not a `check_cols` column |
+| TEMP_ANOMALY | FLOAT | Y | From `weather_analytics`, not a `check_cols` column |
+| ROLLING_PRECIP_7D | FLOAT | Y | From `weather_analytics`, not a `check_cols` column |
 | DBT_SCD_ID | VARCHAR(32) | Y | dbt-generated: unique ID for this SCD Type 2 row version |
 | DBT_UPDATED_AT | TIMESTAMP_NTZ(9) | Y | dbt-generated: when this row version was recorded |
 | DBT_VALID_FROM | TIMESTAMP_NTZ(9) | Y | dbt-generated: start of this row version's validity |
 | DBT_VALID_TO | TIMESTAMP_NTZ(9) | Y | dbt-generated: end of this row version's validity (`NULL` = current) |
 
 Snapshot key: `unique_key='city_date'`, `strategy='check'` on
-`[temp_max, temp_min, precipitation, weather_code, moving_avg_temp_7d,
-temp_anomaly, rolling_precip_7d]` (see `snapshots/weather_snapshot.sql`).
-`daily_avg_temp` and `dry_spell_length` are carried through but not in
-`check_cols`, so a change in only those two columns would not, by itself,
-open a new row version.
+`[temp_max, temp_min, precipitation, weather_code]` (see
+`snapshots/weather_snapshot.sql`). The computed metric columns are stored in
+every row version but are not in `check_cols`; Section 13 explains why.
 
 ## 9. Idempotency Design
 
-Rerunning `weather_etl_dag` for the same day must not create duplicate rows.
-This is enforced in `load()` (`dags/weather_etl_dag.py`) as follows:
+Rerunning `weather_etl_dag` must not create duplicate rows. This is enforced
+in `load()` (`dags/weather_etl_dag.py`) with full-refresh pattern:
 
-1. `CREATE TABLE IF NOT EXISTS` runs **before** `BEGIN`, since Snowflake DDL
-   auto-commits and would otherwise break an open transaction.
-2. New rows are inserted into a temporary staging table, then merged into
-   `CITY_WEATHER_DAILY` with `MERGE ... ON (city, date) WHEN MATCHED THEN
-   UPDATE ... WHEN NOT MATCHED THEN INSERT` -- all inside one `BEGIN`.
-3. Before `COMMIT`, a `GROUP BY (city, date) HAVING COUNT(*) > 1` query
-   verifies no duplicate keys exist, because Snowflake's declared
-   `PRIMARY KEY` is not enforced.
-4. Any exception anywhere in the block triggers `ROLLBACK` and re-raises,
-   so Airflow marks the task failed and no partial write is left committed.
+1. `CREATE SCHEMA IF NOT EXISTS RAW` and `CREATE TABLE IF NOT EXISTS` run
+   **before** `BEGIN`, since Snowflake DDL auto-commits and would otherwise
+   end an open transaction early.
+2. Inside one `BEGIN`, `DELETE FROM RAW.CITY_WEATHER_DAILY` removes the
+   previous load, and every extracted row is inserted with a parameterized
+   `INSERT` (`%s` placeholders, so a missing API value becomes SQL `NULL`).
+3. `COMMIT` makes the delete and inserts visible together. Any exception
+   anywhere in the block triggers `ROLLBACK` and re-raises, so the previous
+   data is kept and Airflow marks the task failed.
 
 Net effect: running the DAG twice for the same date updates that date's row
 in place rather than appending a second copy.
@@ -247,33 +236,52 @@ in place rather than appending a second copy.
 ## 10. dbt Implementation
 
 See `dbt/README.md` for the full layer-by-layer breakdown. Summary:
-`stg_weather` (view) -> `int_weather_metrics` (ephemeral) ->
+`weather_daily` (ephemeral) -> `weather_metrics` (ephemeral) ->
 `weather_analytics` (table), all analytics window functions
 `PARTITION BY city`.
 
 ## 11. dbt Models
 
-- `models/staging/stg_weather.sql`
-- `models/intermediate/int_weather_metrics.sql`
+- `models/transform/weather_daily.sql`
+- `models/transform/weather_metrics.sql`
 - `models/analytics/weather_analytics.sql`
 
 ## 12. dbt Tests
 
-Defined in `models/schema.yml`: `unique` + `not_null` on `city_date` for
-both `stg_weather` and `weather_analytics`; `not_null` on `city` and
-`weather_date`; `accepted_values` on `city` (`Seoul`, `Toronto`).
+Defined in `models/schema.yml`, all on `weather_analytics`: `unique` +
+`not_null` on `city_date`; `not_null` on `city` and `weather_date`;
+`accepted_values` on `city` (`Seoul`, `Toronto`). Because the transform
+models pass every row straight through to `weather_analytics`, testing the
+final table also covers them.
 
-![Figure 6. weather_dbt_dag "dbt_run" task log: stg_weather view and weather_analytics table both built successfully, PASS=2 WARN=0 ERROR=0](../screenshots/06_dbt_run_log.png)
+![Figure 6. weather_dbt_dag "dbt_run" task log: weather_analytics table built successfully, PASS=1 WARN=0 ERROR=0](../screenshots/06_dbt_run_log.png)
 
-![Figure 7. weather_dbt_dag "dbt_test" task log: all 10 tests individually PASS, Done. PASS=10 WARN=0 ERROR=0 SKIP=0 TOTAL=10](../screenshots/07_dbt_test_log.png)
+![Figure 7. weather_dbt_dag "dbt_test" task log: all 5 tests individually PASS, Done. PASS=5 WARN=0 ERROR=0 SKIP=0 TOTAL=5](../screenshots/07_dbt_test_log.png)
 
 ## 13. dbt Snapshot
 
-`snapshots/weather_snapshot.sql`, `strategy='check'`, keyed on `city_date`.
-See Section 8 for its resulting columns and Section 3 for why `check` was
-chosen over `timestamp`.
+`snapshots/weather_snapshot.sql`, `strategy='check'`, keyed on `city_date`,
+with `check_cols` limited to the raw weather columns (`temp_max`,
+`temp_min`, `precipitation`, `weather_code`). See Section 8 for its
+resulting columns and Section 3 for why `check` was chosen over `timestamp`.
 
-![Figure 8. weather_dbt_dag "dbt_snapshot" task log: 1 of 1 OK snapshotted snapshots.weather_snapshot [SUCCESS 244 in 6.47s]](../screenshots/08_dbt_snapshot_log.png)
+The computed metrics are left out of `check_cols` on purpose. They shift
+whenever the 61-day window moves even if the weather data hasn't changed:
+`temp_anomaly`, for example, is measured against the city's average over the
+whole window, so when one day drops out and a new one comes in, every row's
+anomaly changes slightly. Checking those columns would create a new version
+of all 122 rows on every run and bury the real revisions. With only the raw
+columns checked, a new version is recorded when Open-Meteo revises a day's
+values, and a row is closed out when its day ages out of the window.
+
+Both cases showed up in testing. After a few runs on 2026-09-26/27, the
+snapshot held 124 rows: 122 current rows, one earlier version of
+`Seoul_2026-09-27` (its `temp_max` was revised from 26.2 to 26.3 and
+`temp_min` from 16.3 to 16.2 as the day's observations came in), and one
+closed-out `Toronto_2026-07-28`, which dropped out of the window when
+Toronto's local date rolled over to September 27.
+
+![Figure 8. weather_dbt_dag "dbt_snapshot" task log: 1 of 1 OK snapshotted snapshots.weather_snapshot](../screenshots/08_dbt_snapshot_log.png)
 
 ## 14. Airflow/dbt Scheduling
 
@@ -290,7 +298,7 @@ than relying on scheduling two DAGs far enough apart in time.
 **Status: complete.** **Tool:** [Preset](https://preset.io) (cloud-hosted
 Apache Superset). **Team/Workspace:** "DATA 226 Weather Analytics" /
 "Weather Analytics Lab". **Dashboard name:** "Weather Analytics Dashboard".
-**Dataset:** `DEV.ANALYTICS.WEATHER_ANALYTICS`.
+**Dataset:** `ANALYTICS.WEATHER_ANALYTICS`.
 
 **Purpose:** let a viewer compare Seoul vs. Toronto's current weather trend
 -- temperature level and trajectory, anomaly, and precipitation -- without
@@ -350,7 +358,7 @@ Conclusion, for the full verification summary). As of the run on
   temperature, which is exactly the kind of city-relative comparison
   `temp_anomaly` (computed `PARTITION BY city`) is meant to surface.
 
-These figures came from querying `DEV.ANALYTICS.WEATHER_ANALYTICS` directly
+These figures came from querying `ANALYTICS.WEATHER_ANALYTICS` directly
 after a real `dbt run`, and the Preset dashboard confirms the same pattern
 visually (Figures 9-10, Section 15): the default-view "Temperature Anomaly"
 chart ranges from roughly -8 to +6 for both cities, matching the -7.76 to
@@ -365,7 +373,8 @@ to one city.
 
 ## 17. Future Work
 
-- Add more cities by extending the `CITY_CONFIG` Airflow Variable only.
+- Add more cities by extending the `CITY_CONFIG` Airflow Variable and the
+  `accepted_values` test.
 - Backfill a longer history (Open-Meteo's archive API) to make
   `temp_anomaly` a true climatological anomaly instead of a
   within-loaded-window baseline.
@@ -377,17 +386,21 @@ to one city.
 
 The pipeline was verified end-to-end in a real local Airflow environment:
 `weather_etl_dag` (extract, transform, load) and the triggered
-`weather_dbt_dag` (dbt run, snapshot, test) both completed successfully
+`weather_dbt_dag` (dbt run, test, snapshot) both completed successfully
 against the live Snowflake account, loading real Seoul and Toronto data and
-passing all 10 dbt tests. Rerunning the ETL DAG confirmed the MERGE-based
-load is idempotent (stable per-city row counts, zero duplicate keys). One
-Airflow codebase and one dbt project handle both cities through the
-`CITY_CONFIG` Variable and `PARTITION BY city` window functions, satisfying
-the assignment's requirement to treat city as configuration rather than
-forking the pipeline per city.
+passing all 5 dbt tests. Rerunning the ETL DAG confirmed the full-refresh
+load is idempotent: the raw and analytics tables held 122 rows (61 per
+city) after every run. The repository was also tested from a fresh clone
+with a new Airflow container against an empty Snowflake database: following
+only the README setup (`.env`, the `CITY_CONFIG` Variable, and the
+`snowflake_conn` Connection), both DAGs ran green and created all three
+tables with no file edits. One Airflow codebase and one dbt project handle
+both cities through the `CITY_CONFIG` Variable and `PARTITION BY city`
+window functions, satisfying the assignment's requirement to treat city as
+configuration rather than forking the pipeline per city.
 
 The BI layer is also complete: a Preset dashboard ("Weather Analytics
-Dashboard") connects to `DEV.ANALYTICS.WEATHER_ANALYTICS` -- via Snowflake
+Dashboard") connects to `ANALYTICS.WEATHER_ANALYTICS` -- via Snowflake
 key-pair authentication through Preset's Secure Extra configuration, working
 around this account's MFA requirement -- and presents four charts (daily
 average temperature, 7-day moving average, temperature anomaly, 7-day
@@ -395,25 +408,9 @@ rolling precipitation), all grouped by city and filterable by city and date
 range. End to end, the project satisfies Open-Meteo -> Airflow -> Snowflake
 RAW -> dbt -> Snowflake analytics -> BI dashboard with one shared pipeline
 for both cities, and all 10 required screenshots (Airflow Variables and
-Connections, both DAG graph views, the ETL load log, the three dbt task
-logs, and both dashboard views) are captured and present in
-`screenshots/`, embedded throughout this report as Figures 1-10 (Sections 6,
-12, 13, and 15), alongside the system architecture diagram in Section 4. The
-repository is public at the URL above, and the submission date is recorded
-above. This report is complete.
-
-## 19. References
-
-- [Open-Meteo Forecast API](https://open-meteo.com/en/docs)
-- [Snowflake key-pair authentication](https://docs.snowflake.com/en/user-guide/key-pair-auth)
-- [Snowflake transactions](https://docs.snowflake.com/en/sql-reference/transactions)
-- [Snowflake MERGE](https://docs.snowflake.com/en/sql-reference/sql/merge)
-- [Apache Airflow Snowflake provider](https://airflow.apache.org/docs/apache-airflow-providers-snowflake/5.7.0/)
-- [Apache Airflow TriggerDagRunOperator](https://airflow.apache.org/docs/apache-airflow/stable/howto/operator/trigger_dag_run.html)
-- [dbt snapshots](https://docs.getdbt.com/docs/build/snapshots)
-- [dbt tests](https://docs.getdbt.com/docs/build/data-tests)
-- Course materials: SJSU DATA 226, Week 3 (Data Pipelines & Airflow), Week 4
-  (Advanced Airflow), Week 5 (ELT & dbt) -- Keeyong Han
-- This team's own HW2 (Open-Meteo -> Snowflake), HW3
-  (`weather_to_snowflake_airflow.py`), and HW4 (`data226-hw4-dbt`), whose
-  transaction/idempotency and dbt-layering patterns this project builds on
+Connections, both DAG graph views, the raw table row counts, the three dbt
+task logs, and both dashboard views) are captured and present in
+`screenshots/`, embedded throughout this report as Figures 1-10 (Sections 4,
+6, 12, 13, and 15), alongside the system architecture diagram in Section 4.
+The repository is public at the URL above, and the submission date is
+recorded above. This report is complete.
