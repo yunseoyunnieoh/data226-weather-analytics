@@ -415,3 +415,11 @@ task logs, and both dashboard views) are captured and present in
 6, 12, 13, and 15), alongside the system architecture diagram in Section 4.
 The repository is public at the URL above, and the submission date is
 recorded above. This report is complete.
+
+## 19. References
+
+- [Open-Meteo API Documentation](https://open-meteo.com/en/docs)
+- [Apache Airflow Documentation](https://airflow.apache.org/docs/)
+- [dbt Documentation](https://docs.getdbt.com/)
+- [Snowflake Documentation](https://docs.snowflake.com/)
+- [Preset / Apache Superset Documentation](https://docs.preset.io/)
